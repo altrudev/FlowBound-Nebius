@@ -40,7 +40,7 @@ class AuthorityEnvelope(BaseModel):
     predecessor_revision: str
     read_paths: tuple[str, ...] = ()
     write_paths: tuple[str, ...] = ()
-    allowed_commands: tuple[str, ...] = ()
+    allowed_argv_prefixes: tuple[tuple[str, ...], ...] = ()
     network_hosts: tuple[str, ...] = ()
     allow_dependency_changes: bool = False
     allow_git_push: bool = False
@@ -57,17 +57,21 @@ class AuthorityEnvelope(BaseModel):
         description="Strongest claim the execution receipt may make.",
     )
 
-    @field_validator(
-        "read_paths",
-        "write_paths",
-        "denied_paths",
-        "allowed_commands",
-        "network_hosts",
-    )
+    @field_validator("read_paths", "write_paths", "denied_paths", "network_hosts")
     @classmethod
     def no_blank_rules(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if any(not value.strip() for value in values):
             raise ValueError("authority rules may not be blank")
+        return values
+
+    @field_validator("allowed_argv_prefixes")
+    @classmethod
+    def valid_argv_prefixes(
+        cls, values: tuple[tuple[str, ...], ...]
+    ) -> tuple[tuple[str, ...], ...]:
+        for prefix in values:
+            if not prefix or any(not token.strip() for token in prefix):
+                raise ValueError("argv prefixes must contain non-empty tokens")
         return values
 
     @staticmethod
@@ -132,22 +136,22 @@ class AuthorityEnvelope(BaseModel):
             )
 
         if operation.kind is OperationKind.EXECUTE:
-            executable = operation.target.strip()
-            forbidden = (" ", "\t", "\n", ";", "|", "&")
-            if not executable or any(token in executable for token in forbidden):
+            argv = (operation.target, *operation.args)
+            if any(not token.strip() for token in argv):
                 return DecisionRecord(
                     decision=AuthorityDecision.DENY,
-                    reason="executable must be a single structured argv token",
+                    reason="argv tokens must be non-empty",
                 )
-            if executable in self.allowed_commands:
-                return DecisionRecord(
-                    decision=AuthorityDecision.ALLOW,
-                    reason="executable is explicitly allowed; executor must use shell=False",
-                    matched_rule=executable,
-                )
+            for prefix in self.allowed_argv_prefixes:
+                if argv[: len(prefix)] == prefix:
+                    return DecisionRecord(
+                        decision=AuthorityDecision.ALLOW,
+                        reason="argv is inside an explicitly allowed prefix; executor must use shell=False",
+                        matched_rule=" ".join(prefix),
+                    )
             return DecisionRecord(
                 decision=AuthorityDecision.DENY,
-                reason="executable is not explicitly allowed",
+                reason="argv is not inside an explicitly allowed command prefix",
             )
 
         if operation.kind is OperationKind.NETWORK:
