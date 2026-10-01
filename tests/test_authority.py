@@ -16,7 +16,7 @@ def envelope() -> AuthorityEnvelope:
         predecessor_revision="abc123",
         read_paths=("src/**", "tests/**"),
         write_paths=("src/parser.py", "tests/test_parser.py"),
-        allowed_commands=("pytest", "python -m compileall"),
+        allowed_argv_prefixes=(("pytest",), ("python", "-m", "compileall")),
         network_hosts=(),
     )
 
@@ -42,8 +42,12 @@ def test_denies_secret_even_if_broad_read_is_added() -> None:
     assert result.decision is AuthorityDecision.DENY
 
 
-def test_denies_path_traversal(envelope: AuthorityEnvelope) -> None:
-    result = envelope.decide(Operation(kind=OperationKind.READ, target="../.ssh/id_ed25519"))
+@pytest.mark.parametrize(
+    "target",
+    ("../.ssh/id_ed25519", "src/../../.env", "~/.ssh/id_ed25519", "/etc/passwd"),
+)
+def test_denies_path_escape(envelope: AuthorityEnvelope, target: str) -> None:
+    result = envelope.decide(Operation(kind=OperationKind.READ, target=target))
     assert result.decision is AuthorityDecision.DENY
 
 
@@ -57,11 +61,25 @@ def test_denies_unapproved_write(envelope: AuthorityEnvelope) -> None:
     assert result.decision is AuthorityDecision.DENY
 
 
-def test_allows_bounded_test_command(envelope: AuthorityEnvelope) -> None:
+def test_allows_bounded_pytest(envelope: AuthorityEnvelope) -> None:
     result = envelope.decide(
         Operation(kind=OperationKind.EXECUTE, target="pytest", args=("tests/test_parser.py",))
     )
     assert result.decision is AuthorityDecision.ALLOW
+
+
+def test_allows_specific_python_module_prefix(envelope: AuthorityEnvelope) -> None:
+    result = envelope.decide(
+        Operation(kind=OperationKind.EXECUTE, target="python", args=("-m", "compileall", "src"))
+    )
+    assert result.decision is AuthorityDecision.ALLOW
+
+
+def test_denies_arbitrary_python(envelope: AuthorityEnvelope) -> None:
+    result = envelope.decide(
+        Operation(kind=OperationKind.EXECUTE, target="python", args=("-c", "print('escape')"))
+    )
+    assert result.decision is AuthorityDecision.DENY
 
 
 def test_denies_shell_escape(envelope: AuthorityEnvelope) -> None:
