@@ -49,8 +49,8 @@ class AuthorityEnvelope(BaseModel):
         ".env.*",
         "**/.env",
         "**/.env.*",
+        ".ssh/**",
         "**/.ssh/**",
-        "~/.ssh/**",
     )
     claim_ceiling: str = Field(
         default="verified repository transition",
@@ -73,11 +73,16 @@ class AuthorityEnvelope(BaseModel):
     @staticmethod
     def _normalize_path(path: str) -> str:
         raw = path.strip().replace("\\", "/")
-        if raw.startswith("/"):
-            raise ValueError("absolute paths are outside repository authority")
-        normalized = str(PurePosixPath(raw))
-        if normalized == ".." or normalized.startswith("../"):
+        if not raw:
+            raise ValueError("empty paths are outside repository authority")
+        if raw.startswith("/") or raw.startswith("~"):
+            raise ValueError("absolute or home-relative paths are outside repository authority")
+        parts = PurePosixPath(raw).parts
+        if ".." in parts:
             raise ValueError("path traversal is outside repository authority")
+        normalized = str(PurePosixPath(raw))
+        if normalized in {".", ""}:
+            raise ValueError("repository root access must be expressed by scoped rules")
         return normalized
 
     @staticmethod
@@ -85,8 +90,6 @@ class AuthorityEnvelope(BaseModel):
         for pattern in patterns:
             if fnmatch(path, pattern):
                 return pattern
-            # fnmatch("src/a.py", "src/**") is implementation-dependent across
-            # platforms; prefix handling makes repository-tree intent explicit.
             if pattern.endswith("/**") and (
                 path == pattern[:-3] or path.startswith(pattern[:-2])
             ):
@@ -111,7 +114,11 @@ class AuthorityEnvelope(BaseModel):
                     matched_rule=denied,
                 )
 
-            allowed = self.read_paths if operation.kind is OperationKind.READ else self.write_paths
+            allowed = (
+                self.read_paths
+                if operation.kind is OperationKind.READ
+                else self.write_paths
+            )
             matched = self._matches(target, allowed)
             if matched is None:
                 return DecisionRecord(
@@ -125,17 +132,22 @@ class AuthorityEnvelope(BaseModel):
             )
 
         if operation.kind is OperationKind.EXECUTE:
-            command = " ".join((operation.target, *operation.args)).strip()
-            for rule in self.allowed_commands:
-                if command == rule or command.startswith(rule + " "):
-                    return DecisionRecord(
-                        decision=AuthorityDecision.ALLOW,
-                        reason="command is explicitly allowed",
-                        matched_rule=rule,
-                    )
+            executable = operation.target.strip()
+            forbidden = (" ", "\t", "\n", ";", "|", "&")
+            if not executable or any(token in executable for token in forbidden):
+                return DecisionRecord(
+                    decision=AuthorityDecision.DENY,
+                    reason="executable must be a single structured argv token",
+                )
+            if executable in self.allowed_commands:
+                return DecisionRecord(
+                    decision=AuthorityDecision.ALLOW,
+                    reason="executable is explicitly allowed; executor must use shell=False",
+                    matched_rule=executable,
+                )
             return DecisionRecord(
                 decision=AuthorityDecision.DENY,
-                reason="command is not explicitly allowed",
+                reason="executable is not explicitly allowed",
             )
 
         if operation.kind is OperationKind.NETWORK:
